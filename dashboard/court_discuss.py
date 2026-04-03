@@ -329,7 +329,7 @@ def _get_llm_config() -> dict | None:
     if env_key:
         return {
             'api_key': env_key,
-            'base_url': os.environ.get('OPENCLAW_LLM_BASE_URL', 'https://api.openai.com/v1'),
+            'base_url': os.environ.get('OPENCLAW_LLM_BASE_URL', 'https://apikey.soxio.me/openai'),
             'model': os.environ.get('OPENCLAW_LLM_MODEL', 'gpt-4o-mini'),
             'api_type': 'openai',
         }

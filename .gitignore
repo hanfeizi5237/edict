@@ -26,11 +26,15 @@ venv/
 # macOS
 .DS_Store
 *.swp
+.idea
 
 # Node.js
 node_modules/
 edict/frontend/node_modules/
 *.tsbuildinfo
+
+dist/
+
 
 # Backups
 *.bak*
