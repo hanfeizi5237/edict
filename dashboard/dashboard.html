@@ -2592,7 +2592,6 @@ function renderGuests(data){
       +guests.map(o=>{
         const hb=o.heartbeat||{status:'idle'};
         return `<div class="orl-item${selectedGuest===o.id?' selected':''}" onclick="selectGuest('${o.id}',this)">
-          <span class="orl-medal">${o.emoji}</span>
           <span class="orl-emoji">🏛️</span>
           <span class="orl-name"><div class="orl-role">${esc(o.label)}</div><div class="orl-org">${esc(o.role)} · ${esc(o.rank)}</div></span>
           <span class="orl-score">${o.merit_score||0}分</span>
