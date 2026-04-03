@@ -682,7 +682,8 @@
   <div class="tabs">
     <div class="tab active" data-tab="edicts">📜 旨意看板 <span class="tbadge" id="tb-e">0</span></div>
     <div class="tab" data-tab="monitor">🔭 省部调度 <span class="tbadge" id="tb-m">0</span></div>
-    <div class="tab" data-tab="officials">👥 官员总览</div>
+    <div class="tab" data-tab="officials">👥 朝廷官员</div>
+    <div class="tab" data-tab="guests">🏛️ 诸侯 <span class="tbadge" id="tb-g">0</span></div>
     <div class="tab" data-tab="models">⚙️ 模型配置</div>
     <div class="tab" data-tab="skills">🛠️ 技能配置</div>
     <div class="tab" data-tab="sessions">💬 小任务 <span class="tbadge" id="tb-s">0</span></div>
@@ -723,6 +724,17 @@
     <div class="off-layout">
       <div id="off-ranklist" class="off-ranklist"></div>
       <div id="off-detail" class="off-detail"><div class="od-empty">← 点击左侧官员查看详情</div></div>
+    </div>
+  </div>
+
+  <!-- ══ 诸侯 ══>
+  <div class="panel" id="panel-guests">
+    <div class="sec-title" style="margin-bottom:14px">🏛️ 诸侯列传 <span style="font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;color:var(--muted)">— 自定义 Agent</span></div>
+    <div class="off-activity" id="guest-activity" style="display:none"></div>
+    <div class="off-kpi" id="guest-kpi"></div>
+    <div class="off-layout">
+      <div id="guest-ranklist" class="off-ranklist"></div>
+      <div id="guest-detail" class="off-detail"><div class="od-empty">← 点击左侧诸侯查看详情</div></div>
     </div>
   </div>
 
@@ -2472,13 +2484,19 @@ async function refreshNews(){
 /* ══ OFFICIALS ══ */
 let officialsData = null;
 let selectedOfficial = null;
+let selectedGuest = null;
 
 async function loadOfficials(){
   try{
     officialsData = await fetchJ(API+'/officials-stats');
     renderOfficials(officialsData);
+    renderGuests(officialsData);
+    // 更新诸侯 badge
+    const guests = officialsData.officials.filter(o=>o.type==='guest');
+    document.getElementById('tb-g').textContent = guests.length;
   }catch(e){
     document.getElementById('off-detail').innerHTML='<div class="od-empty">⚠️ 无法加载，请确认服务器已启动</div>';
+    document.getElementById('guest-detail').innerHTML='<div class="od-empty">⚠️ 无法加载</div>';
   }
 }
 
@@ -2523,6 +2541,107 @@ function renderOfficials(data){
 
   // 默认选中第一个
   if(!selectedOfficial && offs.length) selectOfficial(offs[0].id);
+}
+
+
+function renderGuests(data){
+  if(!data||!data.officials) return;
+  const guests = data.officials.filter(o=>o.type==='guest');
+  if(!guests.length) {
+    const rl = document.getElementById('guest-ranklist');
+    if(rl) rl.innerHTML = '<div class="empty">暂无诸侯</div>';
+    return;
+  }
+  const maxTk = Math.max(...guests.map(o=>o.tokens_in+o.tokens_out+o.cache_read+o.cache_write),1);
+
+  // 活跃提示条
+  const alive = guests.filter(o=>(o.heartbeat||{}).status==='active');
+  const actEl = document.getElementById('guest-activity');
+  if(actEl){
+    if(alive.length){
+      actEl.style.display='flex';
+      actEl.innerHTML=`<span class="act-label">🟢 当前活跃：</span>`+alive.map(o=>`<span class="act-dot alive">${o.emoji} ${o.label}</span>`).join('')+`<span style="color:var(--muted);font-size:11px;margin-left:auto">其余诸侯待命</span>`;
+    } else {
+      actEl.style.display='none';
+    }
+  }
+
+  // KPI 行
+  const guestKpi = document.getElementById('guest-kpi');
+  if(guestKpi){
+    guestKpi.innerHTML=`
+      <div class="kpi"><div class="kpi-v blue">${guests.length}</div><div class="kpi-l">在籍诸侯</div></div>
+      <div class="kpi"><div class="kpi-v green">${guests.filter(g=>g.sessions>0).length}</div><div class="kpi-l">已激活</div></div>
+      <div class="kpi"><div class="kpi-v gold">${guests.reduce((sum,g)=>sum+(g.tasks_done||0),0)}</div><div class="kpi-l">累计完成任务</div></div>
+      <div class="kpi"><div class="kpi-v">${guests.reduce((sum,g)=>sum+(g.merit_score||0),0)}</div><div class="kpi-l">总功绩</div></div>`;
+  }
+
+  // 左侧排行榜
+  const ranklist = document.getElementById('guest-ranklist');
+  if(ranklist){
+    ranklist.innerHTML=`<div class="orl-hdr">诸侯列传</div>`
+      +guests.map(o=>{
+        const hb=o.heartbeat||{status:'idle'};
+        return `<div class="orl-item${selectedGuest===o.id?' selected':''}" onclick="selectGuest('${o.id}',this)">
+          <span class="orl-medal">${o.emoji}</span>
+          <span class="orl-emoji">🏛️</span>
+          <span class="orl-name"><div class="orl-role">${esc(o.label)}</div><div class="orl-org">${esc(o.role)} · ${esc(o.rank)}</div></span>
+          <span class="orl-score">${o.merit_score||0}分</span>
+          <span class="orl-hbdot ${hb.status}"></span>
+        </div>`;
+      }).join('');
+  }
+
+  if(!selectedGuest && guests.length) selectGuest(guests[0].id);
+}
+
+function selectGuest(id, el){
+  selectedGuest = id;
+  document.querySelectorAll('#guest-ranklist .orl-item').forEach(x=>x.classList.remove('selected'));
+  if(el) el.classList.add('selected');
+  if(!officialsData) return;
+  const o = officialsData.officials.find(x=>x.id===id && x.type==='guest');
+  if(!o) return;
+  const hb = o.heartbeat||{status:'idle',label:'⚪ 待命'};
+  const maxTk = Math.max(...officialsData.officials.filter(x=>x.type==='guest').map(x=>x.tokens_in+x.tokens_out+x.cache_read+x.cache_write),1);
+
+  document.getElementById('guest-detail').innerHTML=`
+    <div class="od-hero">
+      <div class="od-emoji">🏛️</div>
+      <div>
+        <div class="od-name">${esc(o.label)}</div>
+        <div class="od-role">${esc(o.role)} · <span style="color:var(--acc)">${esc(o.model_short||o.model)}</span></div>
+        <div class="od-rank-badge">🏅 ${esc(o.rank)} · 功绩分 ${o.merit_score||0}</div>
+      </div>
+      <div class="od-hb">
+        <div class="hb ${hb.status}" style="margin-bottom:4px">${esc(hb.label)}</div>
+        ${o.last_active?`<div style="font-size:10px;color:var(--muted)">活跃 ${esc(o.last_active)}</div>`:''}
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">${o.sessions||0} 个会话 · ${o.messages||0} 条消息</div>
+      </div>
+    </div>
+    <div class="od-section">
+      <div class="od-sec-title">功绩统计</div>
+      <div class="od-stats">
+        <div class="ods"><div class="ods-v" style="color:var(--ok)">${o.tasks_done||0}</div><div class="ods-l">完成任务</div></div>
+        <div class="ods"><div class="ods-v" style="color:var(--warn)">${o.tasks_active||0}</div><div class="ods-l">执行中</div></div>
+        <div class="ods"><div class="ods-v" style="color:var(--acc)">${o.flow_participations||0}</div><div class="ods-l">参与流转</div></div>
+      </div>
+    </div>
+    <div class="od-section">
+      <div class="od-sec-title">Token 消耗</div>
+      <div class="tbar"><div class="tbar-hdr"><span class="tbar-label">输入</span><span class="tbar-val">${(o.tokens_in||0).toLocaleString()}</span></div><div class="tbar-track"><div class="tbar-fill" style="width:${maxTk>0?Math.round((o.tokens_in||0)/maxTk*100):0}%;background:#6a9eff"></div></div></div>
+      <div class="tbar"><div class="tbar-hdr"><span class="tbar-label">输出</span><span class="tbar-val">${(o.tokens_out||0).toLocaleString()}</span></div><div class="tbar-track"><div class="tbar-fill" style="width:${maxTk>0?Math.round((o.tokens_out||0)/maxTk*100):0}%;background:#a07aff"></div></div></div>
+      <div class="tbar"><div class="tbar-hdr"><span class="tbar-label">缓存读</span><span class="tbar-val">${(o.cache_read||0).toLocaleString()}</span></div><div class="tbar-track"><div class="tbar-fill" style="width:${maxTk>0?Math.round((o.cache_read||0)/maxTk*100):0}%;background:#2ecc8a"></div></div></div>
+      <div class="tbar"><div class="tbar-hdr"><span class="tbar-label">缓存写</span><span class="tbar-val">${(o.cache_write||0).toLocaleString()}</span></div><div class="tbar-track"><div class="tbar-fill" style="width:${maxTk>0?Math.round((o.cache_write||0)/maxTk*100):0}%;background:#f5c842"></div></div></div>
+    </div>
+    <div class="od-section">
+      <div class="od-sec-title">累计费用</div>
+      <div class="od-cost"><span class="odc-v ${o.cost_cny>10?'hi':o.cost_cny>3?'md':'lo'}">¥${(o.cost_cny||0).toFixed(2)}</span><span class="odc-l">≈ ${(o.cost_usd||0).toFixed(4)} USD</span></div>
+    </div>
+    <div class="od-section">
+      <div class="od-sec-title">参与任务</div>
+      <div class="od-edicts">${(o.participated_edicts||[]).length? (o.participated_edicts||[]).map(e=>`<div class="ode-item"><span class="ode-id">${esc(e.id||'')}</span><span class="ode-title">${esc(e.title||'')}</span></div>`).join('') : '<div class="empty">暂无参与任务</div>'}</div>
+    </div>`;
 }
 
 function selectOfficial(id, el){
@@ -2816,6 +2935,7 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   document.getElementById('panel-'+activeTab).classList.add('active');
   if(['models','skills'].includes(activeTab))loadAgentConfig();
   if(activeTab==='officials')loadOfficials();
+  if(activeTab==='guests'){loadOfficials(); document.getElementById('panel-guests').classList.add('active');}
   if(activeTab==='monitor')loadAgentsStatus();
   if(activeTab==='morning')loadMorning();
   if(activeTab==='sessions')renderSessions(liveStatus?liveStatus.tasks:[]);

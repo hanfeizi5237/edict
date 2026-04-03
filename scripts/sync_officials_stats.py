@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""同步各官员统计数据 → data/officials_stats.json"""
-import json, pathlib, datetime, logging
+"""同步各官员/诸侯统计数据 → data/officials_stats.json
+支持自动发现所有 Agent，分为两类：
+- 朝廷官员：预定义 11 人（太子 + 三省六部 + 钦天监）
+- 诸侯：用户自定义 Agent
+"""
+import json, pathlib, datetime, logging, re
 from file_lock import atomic_json_write
 
 log = logging.getLogger('officials')
@@ -11,18 +15,8 @@ DATA = BASE / 'data'
 AGENTS_ROOT = pathlib.Path.home() / '.openclaw' / 'agents'
 OPENCLAW_CFG = pathlib.Path.home() / '.openclaw' / 'openclaw.json'
 
-# Anthropic 定价（每1M token，美元）
-MODEL_PRICING = {
-    'anthropic/claude-sonnet-4-6':  {'in':3.0, 'out':15.0, 'cr':0.30, 'cw':3.75},
-    'anthropic/claude-opus-4-5':    {'in':15.0,'out':75.0, 'cr':1.50, 'cw':18.75},
-    'anthropic/claude-haiku-3-5':   {'in':0.8, 'out':4.0,  'cr':0.08, 'cw':1.0},
-    'openai/gpt-4o':                {'in':2.5, 'out':10.0, 'cr':1.25, 'cw':0},
-    'openai/gpt-4o-mini':           {'in':0.15,'out':0.6,  'cr':0.075,'cw':0},
-    'google/gemini-2.0-flash':      {'in':0.075,'out':0.3, 'cr':0,    'cw':0},
-    'google/gemini-2.5-pro':        {'in':1.25,'out':10.0, 'cr':0,    'cw':0},
-}
-
-OFFICIALS = [
+# 朝廷官员预定义列表（品级固定）
+COURT_OFFICIALS = [
     {'id':'taizi',   'label':'太子',  'role':'太子',    'emoji':'🤴','rank':'储君'},
     {'id':'zhongshu','label':'中书省','role':'中书令',  'emoji':'📜','rank':'正一品'},
     {'id':'menxia',  'label':'门下省','role':'侍中',    'emoji':'🔍','rank':'正一品'},
@@ -36,22 +30,21 @@ OFFICIALS = [
     {'id':'zaochao', 'label':'钦天监','role':'朝报官',  'emoji':'📰','rank':'正三品'},
 ]
 
+# 兼容历史 ID 映射
+ID_ALIAS = {'main': 'taizi'}
+
 def rj(p, d):
     try:
         return json.loads(pathlib.Path(p).read_text(encoding='utf-8'))
     except Exception:
         return d
 
-
-# Pre-load openclaw config once (avoid re-reading per agent)
 _OPENCLAW_CACHE = None
-
 def _load_openclaw_cfg():
     global _OPENCLAW_CACHE
     if _OPENCLAW_CACHE is None:
         _OPENCLAW_CACHE = rj(OPENCLAW_CFG, {})
     return _OPENCLAW_CACHE
-
 
 def normalize_model(model_value, fallback='anthropic/claude-sonnet-4-6'):
     if isinstance(model_value, str) and model_value:
@@ -66,7 +59,6 @@ def get_model(agent_id):
     for a in cfg.get('agents',{}).get('list',[]):
         if a.get('id') == agent_id:
             return normalize_model(a.get('model', default), default)
-    # 兼容历史：太子曾使用 main 作为运行时 id
     if agent_id == 'taizi':
         for a in cfg.get('agents',{}).get('list',[]):
             if a.get('id') == 'main':
@@ -82,7 +74,7 @@ def scan_agent(agent_id):
         return {'tokens_in':0,'tokens_out':0,'cache_read':0,'cache_write':0,'sessions':0,'last_active':None,'messages':0}
     
     data = rj(sj, {})
-    tin = tout = cr = cw = 0
+    tin = tout = cr = cw = msg_count = 0
     last_ts = None
     
     for sid, v in data.items():
@@ -93,123 +85,152 @@ def scan_agent(agent_id):
         ts = v.get('updatedAt')
         if ts:
             try:
-                t = datetime.datetime.fromtimestamp(ts/1000) if isinstance(ts,int) else datetime.datetime.fromisoformat(ts.replace('Z','+00:00'))
+                t = datetime.datetime.fromtimestamp(ts/1000) if isinstance(ts,int) else datetime.datetime.fromisoformat(str(ts).replace('Z','+00:00'))
                 if last_ts is None or t > last_ts: last_ts = t
             except Exception: pass
     
     # Estimate message count from most recent session JSONL
-    msg_count = 0
-    if data:
-        try:
-            sf_key = max(data.keys(), key=lambda k: data[k].get('updatedAt',0) or 0, default=None)
-        except Exception:
-            sf_key = None
-    else:
-        sf_key = None
-    if sf_key and data[sf_key].get('sessionFile'):
-        sf = AGENTS_ROOT / agent_id / 'sessions' / pathlib.Path(data[sf_key]['sessionFile']).name
-        try:
-            lines = sf.read_text(errors='ignore').splitlines()
-            for ln in lines:
-                try:
-                    e = json.loads(ln)
-                    if e.get('type') == 'message' and e.get('message',{}).get('role') == 'assistant':
-                        msg_count += 1
-                except Exception: pass
-        except Exception: pass
-
+    sessions_dir = AGENTS_ROOT / agent_id / 'sessions'
+    if sessions_dir.exists():
+        jsonl_files = sorted(sessions_dir.glob('*.jsonl'), key=lambda f: f.stat().st_mtime, reverse=True)
+        for jf in jsonl_files[:3]:
+            try:
+                lines = jf.read_text(errors='ignore').splitlines()
+                msg_count += sum(1 for ln in lines if ln.strip() and '"role"' in ln)
+            except: pass
+            if msg_count > 0: break
+    
     return {
-        'tokens_in': tin, 'tokens_out': tout,
-        'cache_read': cr, 'cache_write': cw,
-        'sessions': len(data),
-        'last_active': last_ts.strftime('%Y-%m-%d %H:%M') if last_ts else None,
-        'messages': msg_count,
+        'tokens_in': tin, 'tokens_out': tout, 'cache_read': cr, 'cache_write': cw,
+        'sessions': len(data), 'last_active': last_ts.isoformat() if last_ts else None,
+        'messages': msg_count
     }
 
-def calc_cost(s, model):
-    p = MODEL_PRICING.get(model, MODEL_PRICING['anthropic/claude-sonnet-4-6'])
-    usd = (s['tokens_in']/1e6*p['in'] + s['tokens_out']/1e6*p['out']
-         + s['cache_read']/1e6*p['cr'] + s['cache_write']/1e6*p['cw'])
-    return round(usd, 4)
-
-def get_task_stats(org_label, tasks):
-    done   = [t for t in tasks if t.get('state')=='Done' and t.get('org')==org_label]
-    active = [t for t in tasks if t.get('state') in ('Doing','Review','Assigned') and t.get('org')==org_label]
-    fl = sum(1 for t in tasks for f in t.get('flow_log',[])
-             if f.get('from')==org_label or f.get('to')==org_label)
-    # 参与的旨意（JJC）列表
-    participated = []
-    for t in tasks:
-        if not t['id'].startswith('JJC'): continue
-        for f in t.get('flow_log',[]):
-            if f.get('from')==org_label or f.get('to')==org_label:
-                if t['id'] not in [x['id'] for x in participated]:
-                    participated.append({'id':t['id'],'title':t.get('title',''),'state':t.get('state','')})
-                break
-    return {'tasks_done':len(done),'tasks_active':len(active),
-            'flow_participations':fl,'participated_edicts':participated}
-
-def get_hb(agent_id, live_tasks):
-    for t in live_tasks:
-        if t.get('sourceMeta',{}).get('agentId')==agent_id and t.get('heartbeat'):
-            return t['heartbeat']
-    return {'status':'idle','label':'⚪ 待命','ageSec':None}
+def discover_agents():
+    """自动发现所有 Agent，分为朝廷官员和诸侯两类"""
+    court = []
+    guests = []
+    
+    # 扫描 agents 目录
+    if not AGENTS_ROOT.exists():
+        log.warning(f'Agents 目录不存在：{AGENTS_ROOT}')
+        return court, guests
+    
+    # 获取 openclaw.json 中配置的 agent 列表
+    cfg = _load_openclaw_cfg()
+    configured_ids = {a.get('id') for a in cfg.get('agents',{}).get('list',[])}
+    
+    # 扫描目录中的所有 agent
+    for agent_dir in sorted(AGENTS_ROOT.iterdir()):
+        if not agent_dir.is_dir() or agent_dir.name.startswith('.'):
+            continue
+        
+        agent_id = agent_dir.name
+        sessions_file = agent_dir / 'sessions' / 'sessions.json'
+        
+        # 跳过没有 sessions.json 的空目录
+        if not sessions_file.exists():
+            continue
+        
+        # 获取统计数据
+        stats = scan_agent(agent_id)
+        model = get_model(agent_id)
+        
+        # 检查是否是朝廷官员
+        court_meta = next((c for c in COURT_OFFICIALS if c['id'] == agent_id or ID_ALIAS.get(agent_id) == c['id']), None)
+        
+        if court_meta:
+            # 朝廷官员
+            display_id = court_meta['id'] if ID_ALIAS.get(agent_id) != court_meta['id'] else agent_id
+            court.append({
+                'id': display_id,
+                'agentId': agent_id,  # 实际运行时 ID
+                'label': court_meta['label'],
+                'role': court_meta['role'],
+                'emoji': court_meta['emoji'],
+                'rank': court_meta['rank'],
+                'type': 'court',
+                'model': model,
+                **stats
+            })
+        else:
+            # 诸侯（自定义 Agent）
+            # 尝试从 workspace 的 SOUL.md 或 AGENTS.md 提取名称
+            label = agent_id
+            role = '诸侯'
+            emoji = '🏛️'
+            rank = '外戚'
+            
+            workspace = pathlib.Path.home() / f'.openclaw/workspace-{agent_id}'
+            if workspace.exists():
+                soul_md = workspace / 'SOUL.md'
+                if soul_md.exists():
+                    try:
+                        content = soul_md.read_text(encoding='utf-8', errors='ignore')
+                        # 尝试提取 Name
+                        for line in content.splitlines()[:20]:
+                            if line.startswith('- **Name:**'):
+                                name = line.replace('- **Name:**', '').strip()
+                                if name and name != '_':
+                                    label = name
+                            if line.startswith('- **Emoji:**'):
+                                emoji_line = line.replace('- **Emoji:**', '').strip()
+                                if emoji_line and emoji_line != '_':
+                                    emoji = emoji_line
+                    except: pass
+            
+            # 从 openclaw.json 配置中提取 label
+            for a in cfg.get('agents',{}).get('list',[]):
+                if a.get('id') == agent_id:
+                    if a.get('label'):
+                        label = a['label']
+                    break
+            
+            guests.append({
+                'id': agent_id,
+                'label': label,
+                'role': role,
+                'emoji': emoji,
+                'rank': rank,
+                'type': 'guest',
+                'model': model,
+                **stats
+            })
+    
+    # 朝廷官员按品级排序
+    rank_order = {'储君':0, '正一品':1, '正二品':2, '正三品':3}
+    court.sort(key=lambda x: rank_order.get(x['rank'], 99))
+    
+    # 诸侯按名称排序
+    guests.sort(key=lambda x: x['label'])
+    
+    return court, guests
 
 def main():
-    tasks = rj(DATA/'tasks_source.json', [])
-    live  = rj(DATA/'live_status.json', {})
-    live_tasks = live.get('tasks', [])
-
-    result = []
-    for off in OFFICIALS:
-        model   = get_model(off['id'])
-        ss      = scan_agent(off['id'])
-        ts      = get_task_stats(off['label'], tasks)
-        hb      = get_hb(off['id'], live_tasks)
-        cost_usd = calc_cost(ss, model)
-
-        result.append({
-            **off,
-            'model': model,
-            'model_short': model.split('/')[-1] if isinstance(model, str) and '/' in model else str(model),
-            'sessions': ss['sessions'],
-            'tokens_in': ss['tokens_in'],
-            'tokens_out': ss['tokens_out'],
-            'cache_read': ss['cache_read'],
-            'cache_write': ss['cache_write'],
-            'tokens_total': ss['tokens_in'] + ss['tokens_out'],
-            'messages': ss['messages'],
-            'cost_usd': cost_usd,
-            'cost_cny': round(cost_usd * 7.25, 2),
-            'last_active': ss['last_active'],
-            'heartbeat': hb,
-            'tasks_done': ts['tasks_done'],
-            'tasks_active': ts['tasks_active'],
-            'flow_participations': ts['flow_participations'],
-            'participated_edicts': ts['participated_edicts'],
-            'merit_score': ts['tasks_done']*10 + ts['flow_participations']*2 + min(ss['sessions'],20),
-        })
-
-    result.sort(key=lambda x: x['merit_score'], reverse=True)
-    for i, r in enumerate(result): r['merit_rank'] = i+1
-
-    totals = {
-        'tokens_total': sum(r['tokens_total'] for r in result),
-        'cache_total':  sum(r['cache_read']+r['cache_write'] for r in result),
-        'cost_usd':     round(sum(r['cost_usd'] for r in result), 2),
-        'cost_cny':     round(sum(r['cost_cny'] for r in result), 2),
-        'tasks_done':   sum(r['tasks_done'] for r in result),
-    }
-    top = max(result, key=lambda x: x['merit_score'], default={})
-
-    payload = {
+    log.info('开始同步官员/诸侯统计数据...')
+    
+    court, guests = discover_agents()
+    
+    log.info(f'发现朝廷官员：{len(court)} 人')
+    log.info(f'发现诸侯：{len(guests)} 人')
+    
+    # 合并输出
+    output = {
         'generatedAt': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'officials': result,
-        'totals': totals,
-        'top_official': top.get('label',''),
+        'officials': court + guests,
+        'courtCount': len(court),
+        'guestCount': len(guests)
     }
-    atomic_json_write(DATA/'officials_stats.json', payload)
-    log.info(f'{len(result)} officials | cost=¥{totals["cost_cny"]} | top={top.get("label","")}')
+    
+    output_file = DATA / 'officials_stats.json'
+    atomic_json_write(output_file, output)
+    log.info(f'✅ 已写入 {output_file}')
+    
+    # 打印摘要
+    for o in court:
+        log.info(f"  朝廷：{o['emoji']} {o['label']} ({o['role']}) - {o['rank']}")
+    for g in guests:
+        log.info(f"  诸侯：{g['emoji']} {g['label']} ({g['role']}) - {g['rank']}")
 
 if __name__ == '__main__':
     main()
