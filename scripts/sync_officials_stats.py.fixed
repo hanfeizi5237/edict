@@ -22,7 +22,8 @@ MODEL_PRICING = {
     'google/gemini-2.5-pro':        {'in':1.25,'out':10.0, 'cr':0,    'cw':0},
 }
 
-OFFICIALS = [
+# 朝廷官员预定义列表
+COURT_OFFICIALS = [
     {'id':'taizi',   'label':'太子',  'role':'太子',    'emoji':'🤴','rank':'储君'},
     {'id':'zhongshu','label':'中书省','role':'中书令',  'emoji':'📜','rank':'正一品'},
     {'id':'menxia',  'label':'门下省','role':'侍中',    'emoji':'🔍','rank':'正一品'},
@@ -35,6 +36,8 @@ OFFICIALS = [
     {'id':'libu_hr', 'label':'吏部',  'role':'吏部尚书','emoji':'👔','rank':'正二品'},
     {'id':'zaochao', 'label':'钦天监','role':'朝报官',  'emoji':'📰','rank':'正三品'},
 ]
+
+ID_ALIAS = {'main': 'taizi'}
 
 def rj(p, d):
     try:
@@ -149,12 +152,18 @@ def get_task_stats(org_label, tasks):
     return {'tasks_done':len(done),'tasks_active':len(active),
             'flow_participations':fl,'participated_edicts':participated}
 
+def get_hb(agent_id, live_tasks):
+    for t in live_tasks:
+        if t.get('sourceMeta',{}).get('agentId')==agent_id and t.get('heartbeat'):
+            return t['heartbeat']
+    return {'status':'idle','label':'⚪ 待命','ageSec':None}
 
-def discover_guests(tasks):
-    """发现诸侯（自定义 Agent）并计算统计"""
+def discover_guests():
+    """发现诸侯（自定义 Agent）"""
     guests = []
     cfg = _load_openclaw_cfg()
-    court_ids = set(o['id'] for o in OFFICIALS) | set(ID_ALIAS.keys())
+    configured_ids = {a.get('id') for a in cfg.get('agents',{}).get('list',[])}
+    court_ids = set(c['id'] for c in COURT_OFFICIALS) | set(ID_ALIAS.keys())
     
     if not AGENTS_ROOT.exists():
         return guests
@@ -164,59 +173,22 @@ def discover_guests(tasks):
             continue
         agent_id = agent_dir.name
         if agent_id in court_ids:
-            continue
+            continue  # 跳过朝廷官员
         
         sj = agent_dir / 'sessions' / 'sessions.json'
         if not sj.exists():
             continue
         
-        # 读取基础信息
+        # 读取 label
         label = agent_id
         for a in cfg.get('agents',{}).get('list',[]):
             if a.get('id') == agent_id and a.get('label'):
                 label = a['label']
                 break
         
-        # 计算统计
-        ss = scan_agent(agent_id)
-        model = get_model(agent_id)
-        ts = get_task_stats(label, tasks)
-        cost_usd = calc_cost(ss, model)
-        
-        guests.append({
-            'id': agent_id,
-            'label': label,
-            'role': '诸侯',
-            'emoji': '🏛️',
-            'rank': '外戚',
-            'type': 'guest',
-            'model': model,
-            'model_short': model.split('/')[-1] if isinstance(model, str) and '/' in model else str(model),
-            'sessions': ss['sessions'],
-            'tokens_in': ss['tokens_in'],
-            'tokens_out': ss['tokens_out'],
-            'cache_read': ss['cache_read'],
-            'cache_write': ss['cache_write'],
-            'tokens_total': ss['tokens_in'] + ss['tokens_out'],
-            'messages': ss['messages'],
-            'cost_usd': cost_usd,
-            'cost_cny': round(cost_usd * 7.25, 2),
-            'last_active': ss['last_active'],
-            'heartbeat': {'status':'idle','label':'⚪ 待命','ageSec':None},
-            'tasks_done': ts['tasks_done'],
-            'tasks_active': ts['tasks_active'],
-            'flow_participations': ts['flow_participations'],
-            'participated_edicts': ts['participated_edicts'],
-            'merit_score': ts['tasks_done']*10 + ts['flow_participations']*2 + min(ss['sessions'],20),
-        })
+        guests.append({'id': agent_id, 'label': label, 'role': '诸侯', 'emoji': '🏛️', 'rank': '外戚', 'type': 'guest'})
     
     return guests
-
-def get_hb(agent_id, live_tasks):
-    for t in live_tasks:
-        if t.get('sourceMeta',{}).get('agentId')==agent_id and t.get('heartbeat'):
-            return t['heartbeat']
-    return {'status':'idle','label':'⚪ 待命','ageSec':None}
 
 def main():
     tasks = rj(DATA/'tasks_source.json', [])
@@ -224,7 +196,13 @@ def main():
     live_tasks = live.get('tasks', [])
 
     result = []
-    for off in OFFICIALS:
+    
+    # 处理朝廷官员
+    for off in COURT_OFFICIALS:
+        agent_id = off['id']
+        if ID_ALIAS.get(agent_id):
+            # 使用别名 ID 扫描
+            pass
         model   = get_model(off['id'])
         ss      = scan_agent(off['id'])
         ts      = get_task_stats(off['label'], tasks)
