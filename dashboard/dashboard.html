@@ -2489,15 +2489,19 @@ let selectedGuest = null;
 
 async function loadOfficials(){
   try{
-    officialsData = await fetchJ(API+'/officials-stats');
+    const data = await fetchJ(API+'/officials-stats');
+    officialsData = data;
     renderOfficials(officialsData);
     renderGuests(officialsData);
-    // 更新诸侯 badge
     const guests = officialsData.officials.filter(o=>o.type==='guest');
-    document.getElementById('tb-g').textContent = guests.length;
+    const tb = document.getElementById('tb-g');
+    if(tb) tb.textContent = guests.length;
   }catch(e){
-    document.getElementById('off-detail').innerHTML='<div class="od-empty">⚠️ 无法加载，请确认服务器已启动</div>';
-    document.getElementById('guest-detail').innerHTML='<div class="od-empty">⚠️ 无法加载</div>';
+    console.error('loadOfficials error:', e);
+    const od = document.getElementById('off-detail');
+    const gd = document.getElementById('guest-detail');
+    if(od) od.innerHTML='<div class="od-empty">⚠️ 无法加载</div>';
+    if(gd) gd.innerHTML='<div class="od-empty">⚠️ 无法加载</div>';
   }
 }
 
@@ -2546,7 +2550,10 @@ function renderOfficials(data){
 
 
 function renderGuests(data){
-  if(!data||!data.officials) return;
+  if(!data||!data.officials){
+    console.warn('renderGuests: no data');
+    return;
+  }
   const guests = data.officials.filter(o=>o.type==='guest');
   if(!guests.length) {
     const rl = document.getElementById('guest-ranklist');
@@ -2569,6 +2576,7 @@ function renderGuests(data){
 
   // KPI 行
   const guestKpi = document.getElementById('guest-kpi');
+  console.log('renderGuests: guests=', guests.length, 'kpi=', guestKpi);
   if(guestKpi){
     guestKpi.innerHTML=`
       <div class="kpi"><div class="kpi-v blue">${guests.length}</div><div class="kpi-l">在籍诸侯</div></div>
