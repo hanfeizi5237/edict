@@ -2003,6 +2003,7 @@ async function loadAgentConfig(){
 async function loadAll(){
   await loadLive();
   if(['models','skills'].includes(activeTab))await loadAgentConfig();
+  if(activeTab==='officials'||activeTab==='guests')loadOfficials();
   if(activeTab==='sessions')renderSessions(liveStatus?liveStatus.tasks:[]);
   if(activeTab==='memorials')renderMemorials();
   if(activeTab==='templates')renderTemplates();
@@ -2935,7 +2936,7 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   document.getElementById('panel-'+activeTab).classList.add('active');
   if(['models','skills'].includes(activeTab))loadAgentConfig();
   if(activeTab==='officials')loadOfficials();
-  if(activeTab==='guests'){loadOfficials(); document.getElementById('panel-guests').classList.add('active');}
+  if(activeTab==='guests')loadOfficials();
   if(activeTab==='monitor')loadAgentsStatus();
   if(activeTab==='morning')loadMorning();
   if(activeTab==='sessions')renderSessions(liveStatus?liveStatus.tasks:[]);
