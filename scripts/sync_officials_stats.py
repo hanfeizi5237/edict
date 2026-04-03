@@ -22,6 +22,8 @@ MODEL_PRICING = {
     'google/gemini-2.5-pro':        {'in':1.25,'out':10.0, 'cr':0,    'cw':0},
 }
 
+ID_ALIAS = {'main': 'taizi'}
+
 OFFICIALS = [
     {'id':'taizi',   'label':'太子',  'role':'太子',    'emoji':'🤴','rank':'储君'},
     {'id':'zhongshu','label':'中书省','role':'中书令',  'emoji':'📜','rank':'正一品'},
@@ -265,14 +267,21 @@ def main():
     }
     top = max(result, key=lambda x: x['merit_score'], default={})
 
+    # 发现诸侯
+    guests = discover_guests(tasks)
+    guests.sort(key=lambda x: x['merit_score'], reverse=True)
+    for i, g in enumerate(guests): g['merit_rank'] = i+1
+    
     payload = {
         'generatedAt': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'officials': result,
+        'officials': result + guests,
         'totals': totals,
         'top_official': top.get('label',''),
+        'courtCount': len(result),
+        'guestCount': len(guests),
     }
     atomic_json_write(DATA/'officials_stats.json', payload)
-    log.info(f'{len(result)} officials | cost=¥{totals["cost_cny"]} | top={top.get("label","")}')
+    log.info(f'{len(result)} officials | {len(guests)} guests | cost=¥{totals["cost_cny"]} | top={top.get("label","")}')
 
 if __name__ == '__main__':
     main()
