@@ -14,6 +14,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore, DEPTS } from '../store';
 import { api } from '../api';
+import DiscussionHistoryModal from './DiscussionHistoryModal';
 
 // ── 常量 ──
 
@@ -76,6 +77,8 @@ export default function CourtDiscussion() {
 
   // 皇帝发言
   const [userInput, setUserInput] = useState('');
+  // 讨论记录弹窗
+  const [showHistory, setShowHistory] = useState(false);
   // 天命降临
   const [showDecree, setShowDecree] = useState(false);
   const [decreeInput, setDecreeInput] = useState('');
@@ -198,8 +201,9 @@ export default function CourtDiscussion() {
         cycle();
         setEmotions((prev) => ({ ...prev, ...emotionMap }));
       }
-    } catch {
-      // silently
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '推进失败';
+      toast(msg, 'err');
     } finally {
       setLoading(false);
     }
@@ -458,6 +462,12 @@ export default function CourtDiscussion() {
         </div>
         <div className="flex items-center gap-1.5">
           <button
+            onClick={() => setShowHistory(true)}
+            className="text-xs px-2.5 py-1 rounded-lg border border-[var(--line)] text-[var(--muted)] hover:text-[var(--text)] transition"
+          >
+            📜 记录
+          </button>
+          <button
             onClick={() => setShowDecree(!showDecree)}
             className="text-xs px-2.5 py-1 rounded-lg border border-amber-600/40 text-amber-400 hover:bg-amber-900/20 transition"
             title="天命降临 — 上帝视角干预"
@@ -684,6 +694,8 @@ export default function CourtDiscussion() {
           )}
         </div>
       </div>
+      {/* 讨论记录弹窗 */}
+      {showHistory && <DiscussionHistoryModal onClose={() => setShowHistory(false)} />}
     </div>
   );
 }

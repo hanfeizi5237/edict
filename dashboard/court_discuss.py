@@ -224,6 +224,7 @@ def conclude_session(session_id: str) -> dict:
         return {'ok': False, 'error': f'会话 {session_id} 不存在'}
 
     session['phase'] = 'concluded'
+    session['concluded_at'] = time.time()
 
     # 尝试用 LLM 生成总结
     summary = _llm_summarize(session)
@@ -244,6 +245,9 @@ def conclude_session(session_id: str) -> dict:
     })
     session['summary'] = summary
 
+    # 持久化到数据库
+    persist_session(session)
+    
     return {
         'ok': True,
         'session_id': session_id,
@@ -692,3 +696,327 @@ def _serialize(session: dict) -> dict:
         'round': session['round'],
         'phase': session['phase'],
     }
+
+
+# ── Agent 调用集成 ──
+
+def call_agent_official(official_id: str, topic: str, history: str) -> dict:
+    """调用真实 Agent 参与议政。"""
+    import subprocess
+    import time
+    
+    profile = OFFICIAL_PROFILES.get(official_id, {})
+    
+    prompt = f"""【朝堂议政】
+
+议题：{topic}
+
+你的身份：{profile.get('name', official_id)}（{profile.get('role', '')}）
+你的职责：{profile.get('duty', '综合事务')}
+你的性格：{profile.get('personality', '')}
+你的说话风格：{profile.get('speaking_style', '')}
+
+讨论历史：
+{history if history else '（讨论刚刚开始）'}
+
+请以上述身份发表意见，保持角色性格和说话风格。发言控制在 200 字以内。"""
+
+    cmd = [
+        'openclaw', 'agent',
+        '--agent', official_id,
+        '--message', prompt,
+        '--local'
+    ]
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        
+        # 提取有效内容（过滤日志行）
+        content = result.stdout
+        lines = content.split('\n')
+        clean_lines = [l for l in lines if not l.startswith('[') and not l.startswith('---')]
+        clean_content = '\n'.join(clean_lines).strip()
+        
+        return {
+            'ok': result.returncode == 0 and clean_content,
+            'content': clean_content or content,
+            'official_id': official_id,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            'ok': False,
+            'error': 'Agent 响应超时',
+            'official_id': official_id,
+        }
+    except Exception as e:
+        return {
+            'ok': False,
+            'error': str(e),
+            'official_id': official_id,
+        }
+
+
+def advance_discussion_with_agents(session_id: str, user_message: str = None, decree: str = None) -> dict:
+    """推进一轮讨论，调用真实 Agent。"""
+    session = _sessions.get(session_id)
+    if not session:
+        return {'ok': False, 'error': f'会话 {session_id} 不存在'}
+
+    session['round'] += 1
+    round_num = session['round']
+
+    # 记录皇帝发言
+    if user_message:
+        session['messages'].append({
+            'type': 'emperor',
+            'content': user_message,
+            'timestamp': time.time(),
+        })
+
+    # 记录天命降临
+    if decree:
+        session['messages'].append({
+            'type': 'decree',
+            'content': decree,
+            'timestamp': time.time(),
+        })
+
+    # 格式化历史
+    history = ''
+    for msg in session['messages'][-20:]:
+        if msg['type'] == 'system':
+            history += f"\n【系统】{msg['content']}\n"
+        elif msg['type'] == 'emperor':
+            history += f"\n皇帝：{msg['content']}\n"
+        elif msg['type'] == 'decree':
+            history += f"\n【天命降临】{msg['content']}\n"
+        elif msg['type'] == 'official':
+            history += f"\n{msg.get('official_name', '?')}：{msg.get('content', '')}\n"
+
+    # 并行调用各 Agent
+    import concurrent.futures
+    
+    new_messages = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        future_to_official = {
+            executor.submit(call_agent_official, o['id'], session['topic'], history): o
+            for o in session['officials']
+        }
+        
+        for future in concurrent.futures.as_completed(future_to_official, timeout=180):
+            official = future_to_official[future]
+            try:
+                result = future.result()
+                if result['ok']:
+                    new_messages.append({
+                        'official_id': result['official_id'],
+                        'name': OFFICIAL_PROFILES.get(result['official_id'], {}).get('name', '?'),
+                        'content': result['content'],
+                        'emotion': 'neutral',
+                        'action': None,
+                    })
+            except Exception as e:
+                logger.warning(f'Agent {official["id"]} 调用失败：{e}')
+
+    # 添加到历史
+    for msg in new_messages:
+        session['messages'].append({
+            'type': 'official',
+            'official_id': msg.get('official_id', ''),
+            'official_name': msg.get('name', ''),
+            'content': msg.get('content', ''),
+            'emotion': msg.get('emotion', 'neutral'),
+            'action': msg.get('action'),
+            'timestamp': time.time(),
+        })
+
+    # 持久化到数据库
+    persist_session(session)
+    
+    return {
+        'ok': True,
+        'session_id': session_id,
+        'round': round_num,
+        'new_messages': new_messages,
+        'total_messages': len(session['messages']),
+    }
+
+
+# ── SQLite 持久化 ──
+
+import sqlite3
+from pathlib import Path
+
+DB_PATH = Path(__file__).parent.parent / 'data' / 'court_discussions.db'
+
+def _get_db_connection():
+    """获取数据库连接。"""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_db():
+    """初始化数据库表。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    
+    # 议政会话表
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS court_sessions (
+            session_id TEXT PRIMARY KEY,
+            topic TEXT NOT NULL,
+            task_id TEXT,
+            officials TEXT,  -- JSON 数组
+            round INTEGER DEFAULT 0,
+            phase TEXT DEFAULT 'discussing',
+            created_at INTEGER,
+            concluded_at INTEGER,
+            summary TEXT
+        )
+    """)
+    
+    # 议政消息表
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS court_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            message_type TEXT NOT NULL,
+            official_id TEXT,
+            official_name TEXT,
+            content TEXT NOT NULL,
+            emotion TEXT,
+            created_at INTEGER,
+            FOREIGN KEY (session_id) REFERENCES court_sessions(session_id)
+        )
+    """)
+    
+    # 创建索引
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON court_messages(session_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_phase ON court_sessions(phase)")
+    
+    conn.commit()
+    conn.close()
+    print(f"✅ 朝堂议政数据库初始化完成：{DB_PATH}")
+
+def persist_session(session: dict):
+    """持久化议政会话。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    
+    # 保存会话
+    cur.execute("""
+        INSERT OR REPLACE INTO court_sessions 
+        (session_id, topic, task_id, officials, round, phase, created_at, concluded_at, summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        session['session_id'],
+        session['topic'],
+        session.get('task_id', ''),
+        json.dumps([{'id': o['id'], 'name': o['name']} for o in session['officials']]),
+        session['round'],
+        session['phase'],
+        int(session.get('created_at', 0)),
+        int(session.get('concluded_at', 0)) if session.get('concluded_at') else None,
+        session.get('summary', ''),
+    ))
+    
+    # 保存消息
+    for msg in session['messages']:
+        cur.execute("""
+            INSERT INTO court_messages (session_id, message_type, official_id, official_name, content, emotion, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            session['session_id'],
+            msg['type'],
+            msg.get('official_id', ''),
+            msg.get('official_name', ''),
+            msg['content'],
+            msg.get('emotion', 'neutral'),
+            int(msg.get('timestamp', 0)),
+        ))
+    
+    conn.commit()
+    conn.close()
+
+def load_session(session_id: str) -> dict | None:
+    """从数据库加载会话。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("SELECT * FROM court_sessions WHERE session_id = ?", (session_id,))
+    row = cur.fetchone()
+    
+    if not row:
+        conn.close()
+        return None
+    
+    session = {
+        'session_id': row['session_id'],
+        'topic': row['topic'],
+        'task_id': row['task_id'] or '',
+        'officials': json.loads(row['officials']),
+        'round': row['round'],
+        'phase': row['phase'],
+        'created_at': row['created_at'],
+        'concluded_at': row['concluded_at'],
+        'summary': row['summary'],
+        'messages': [],
+    }
+    
+    # 加载消息
+    cur.execute("""
+        SELECT * FROM court_messages WHERE session_id = ? ORDER BY created_at
+    """, (session_id,))
+    
+    for msg_row in cur.fetchall():
+        session['messages'].append({
+            'type': msg_row['message_type'],
+            'official_id': msg_row['official_id'],
+            'official_name': msg_row['official_name'],
+            'content': msg_row['content'],
+            'emotion': msg_row['emotion'],
+            'timestamp': msg_row['created_at'],
+        })
+    
+    conn.close()
+    return session
+
+def list_sessions(limit: int = 50) -> list[dict]:
+    """列出所有会话。"""
+    conn = _get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT session_id, topic, round, phase, created_at, concluded_at, summary
+        FROM court_sessions
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (limit,))
+    
+    sessions = []
+    for row in cur.fetchall():
+        # 统计消息数
+        cur.execute("SELECT COUNT(*) FROM court_messages WHERE session_id = ?", (row['session_id'],))
+        msg_count = cur.fetchone()[0]
+        
+        sessions.append({
+            'session_id': row['session_id'],
+            'topic': row['topic'],
+            'round': row['round'],
+            'phase': row['phase'],
+            'message_count': msg_count,
+            'created_at': row['created_at'],
+            'concluded_at': row['concluded_at'],
+            'summary': row['summary'],
+        })
+    
+    conn.close()
+    return sessions
+
+def get_session_detail(session_id: str) -> dict | None:
+    """获取会话详情（用于前端显示）。"""
+    return load_session(session_id)
+
+# 初始化数据库
+_init_db()

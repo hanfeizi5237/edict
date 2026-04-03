@@ -19,6 +19,7 @@ async function postJ<T>(url: string, data: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.json();
 }
 
@@ -107,6 +108,11 @@ export const api = {
     postJ<ActionResult>(`${API_BASE}/api/court-discuss/destroy`, { sessionId }),
   courtDiscussFate: () =>
     fetchJ<{ ok: boolean; event: string }>(`${API_BASE}/api/court-discuss/fate`),
+  // 讨论记录
+  courtDiscussHistory: () =>
+    fetchJ<CourtDiscussHistoryResult>(`${API_BASE}/api/court-discuss/history`),
+  courtDiscussDetail: (id: string) =>
+    fetchJ<CourtDiscussDetailResult>(`${API_BASE}/api/court-discuss/detail/${encodeURIComponent(id)}`),
 };
 
 // ── Types ──
@@ -428,5 +434,55 @@ export interface CourtDiscussResult {
   }>;
   scene_note?: string;
   total_messages?: number;
+  error?: string;
+}
+
+// 讨论记录
+
+export interface CourtDiscussHistoryItem {
+  id: string;
+  topic: string;
+  officials: string[];
+  message_count: number;
+  round_count: number;
+  started_at: string;
+  concluded_at?: string;
+  summary?: string;
+  status: 'concluded' | 'active' | 'abandoned';
+}
+
+export interface CourtDiscussHistoryResult {
+  ok: boolean;
+  records?: CourtDiscussHistoryItem[];
+  count?: number;
+  error?: string;
+}
+
+export interface CourtDiscussMessage {
+  type: string;
+  content: string;
+  official_id?: string;
+  official_name?: string;
+  official_emoji?: string;
+  emotion?: string;
+  action?: string;
+  timestamp?: number;
+}
+
+export interface CourtDiscussDetailResult {
+  ok: boolean;
+  id?: string;
+  topic?: string;
+  officials?: Array<{
+    id: string;
+    name: string;
+    emoji: string;
+    role: string;
+  }>;
+  messages?: CourtDiscussMessage[];
+  round_count?: number;
+  started_at?: string;
+  concluded_at?: string;
+  summary?: string;
   error?: string;
 }

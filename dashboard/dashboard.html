@@ -1009,7 +1009,7 @@ function miniPipe(t){
 /* ══ EDICT CARDS ══ */
 function renderEdicts(tasks){
   const allEdicts = tasks.filter(isEdict);
-  const activeEdicts = allEdicts.filter(t=>!isArchived(t));
+  const activeEdicts = allEdicts.filter(t=>!isArchived(t) && !['Done','Cancelled'].includes(t.state));
   const archivedEdicts = allEdicts.filter(t=>isArchived(t));
   // Apply filter
   let edicts;
