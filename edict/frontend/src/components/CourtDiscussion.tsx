@@ -15,6 +15,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useStore, DEPTS } from '../store';
 import { api } from '../api';
 import DiscussionHistoryModal from './DiscussionHistoryModal';
+import OfficialTooltip from './OfficialTooltip';
 
 // ── 常量 ──
 
@@ -90,6 +91,8 @@ export default function CourtDiscussion() {
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   // 官员情绪
   const [emotions, setEmotions] = useState<Record<string, string>>({});
+  // 官员身份浮层
+  const [tooltipOfficial, setTooltipOfficial] = useState<{id: string; x: number; y: number} | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const toast = useStore((s) => s.toast);
@@ -615,13 +618,15 @@ export default function CourtDiscussion() {
                   )}
                   {/* 头像 */}
                   <div
-                    className="relative w-10 h-10 rounded-full flex items-center justify-center text-lg border-2 transition-all"
+                    className="relative w-10 h-10 rounded-full flex items-center justify-center text-lg border-2 transition-all cursor-pointer"
                     style={{
                       borderColor: isSpeaking ? color : color + '40',
                       background: isSpeaking ? color + '30' : color + '10',
                       transform: isSpeaking ? 'scale(1.2)' : 'scale(1)',
                       boxShadow: isSpeaking ? `0 0 16px ${color}50` : 'none',
                     }}
+                    onMouseEnter={(e) => setTooltipOfficial({ id: o.id, x: e.clientX, y: e.clientY })}
+                    onMouseLeave={() => setTooltipOfficial(null)}
                   >
                     {o.emoji}
                     {/* 情绪气泡 */}
@@ -651,8 +656,12 @@ export default function CourtDiscussion() {
         <div className="bg-[var(--panel)] rounded-xl border border-[var(--line)] flex flex-col" style={{ maxHeight: 500 }}>
           {/* 消息列表 */}
           <div className="flex-1 overflow-y-auto p-3 space-y-2" style={{ minHeight: 200 }}>
-            {messages.map((msg, i) => (
-              <MessageBubble key={i} msg={msg} officials={officials} />
+            {messages.map((msg) => (
+              <MessageBubble
+                key={`${msg.type}-${msg.timestamp || Date.now()}-${msg.official_id || 'unknown'}`}
+                msg={msg}
+                officials={officials}
+              />
             ))}
             {loading && (
               <div className="text-xs text-[var(--muted)] text-center py-2" style={{ animation: 'pulse 1.5s infinite' }}>
@@ -696,6 +705,19 @@ export default function CourtDiscussion() {
       </div>
       {/* 讨论记录弹窗 */}
       {showHistory && <DiscussionHistoryModal onClose={() => setShowHistory(false)} />}
+      {/* 官员身份浮层 */}
+      {tooltipOfficial && (() => {
+        const o = officials.find(x => x.id === tooltipOfficial.id);
+        if (!o) return null;
+        return (
+          <OfficialTooltip
+            official={o}
+            x={tooltipOfficial.x}
+            y={tooltipOfficial.y}
+            visible={true}
+          />
+        );
+      })()}
     </div>
   );
 }

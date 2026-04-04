@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import OfficialTooltip from './OfficialTooltip';
 import { useStore, STATE_LABEL } from '../store';
 
 const MEDALS = ['🥇', '🥈', '🥉'];
@@ -13,6 +14,8 @@ export default function OfficialPanel() {
   useEffect(() => {
     loadOfficials();
   }, [loadOfficials]);
+
+  const [tooltipOfficial, setTooltipOfficial] = useState<{id: string; x: number; y: number} | null>(null);
 
   if (!officialsData?.officials) {
     return <div className="empty">⚠️ 请确保本地服务器已启动</div>;
@@ -76,6 +79,8 @@ export default function OfficialPanel() {
                 key={o.id}
                 className={`orl-item${selId === o.id ? ' selected' : ''}`}
                 onClick={() => setSelectedOfficial(o.id)}
+                onMouseEnter={(e) => setTooltipOfficial({ id: o.id, x: e.clientX, y: e.clientY })}
+                onMouseLeave={() => setTooltipOfficial(null)}
               >
                 <span style={{ minWidth: 24, textAlign: 'center' }}>
                   {o.merit_rank <= 3 ? MEDALS[o.merit_rank - 1] : '#' + o.merit_rank}
@@ -101,6 +106,19 @@ export default function OfficialPanel() {
           )}
         </div>
       </div>
+      {/* 官员信息浮层 */}
+      {tooltipOfficial && (() => {
+        const o = officialsData?.officials?.find(x => x.id === tooltipOfficial.id);
+        if (!o) return null;
+        return (
+          <OfficialTooltip
+            official={{ id: o.id, name: o.label, emoji: o.emoji, role: o.role }}
+            x={tooltipOfficial.x}
+            y={tooltipOfficial.y}
+            visible={true}
+          />
+        );
+      })()}
     </div>
   );
 }
