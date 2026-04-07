@@ -26,12 +26,18 @@ venv/
 # macOS
 .DS_Store
 *.swp
-.idea
+.idea/
 
 # Node.js
 node_modules/
 edict/frontend/node_modules/
 *.tsbuildinfo
+
+# Vite cache
+.vite/
+
+# IDE
+.vscode/
 
 dist/
 

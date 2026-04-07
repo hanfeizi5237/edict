@@ -16,6 +16,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+# JWT 认证模块
+from auth import init as auth_init, requires_auth, extract_token, verify_token, \
+    is_enabled as auth_enabled, is_configured as auth_configured, \
+    setup_password, verify_password, create_token
+
 # 引入文件锁工具，确保与其他脚本并发安全
 scripts_dir = str(pathlib.Path(__file__).parent.parent / 'scripts')
 sys.path.insert(0, scripts_dir)
@@ -343,9 +348,13 @@ def add_remote_skill(agent_id, skill_name, source_url, description=''):
         
         elif source_url.startswith('file://'):
             # file:// URL 格式
-            local_path = pathlib.Path(source_url[7:])
+            local_path = pathlib.Path(source_url[7:]).resolve()
             if not local_path.exists():
                 return {'ok': False, 'error': f'本地文件不存在: {local_path}'}
+            # 路径遍历防护：与本地路径分支一致，确保在允许范围内
+            allowed_roots = (OCLAW_HOME.resolve(), BASE.parent.resolve())
+            if not any(str(local_path).startswith(str(root)) for root in allowed_roots):
+                return {'ok': False, 'error': '路径不在允许的目录范围内'}
             content = local_path.read_text()
         
         elif source_url.startswith('/') or source_url.startswith('.'):
@@ -1032,6 +1041,7 @@ def _scheduler_mark_progress(task, note=''):
     sched['stallSince'] = None
     sched['retryCount'] = 0
     sched['escalationLevel'] = 0
+    sched['rollbackCount'] = 0
     sched['lastEscalatedAt'] = None
     if note:
         _scheduler_add_flow(task, f'进展确认：{note}')
@@ -1214,9 +1224,21 @@ def handle_scheduler_scan(threshold_sec=600):
             continue
 
         if sched.get('autoRollback', True):
+            rollback_count = int(sched.get('rollbackCount') or 0)
+            max_rollback = int(sched.get('maxRollback') or 3)
             snapshot = sched.get('snapshot') or {}
             snap_state = snapshot.get('state')
-            if snap_state and snap_state != state:
+            if rollback_count >= max_rollback:
+                # 已达最大回滚次数，标记 Blocked 避免无限循环
+                if state != 'Blocked':
+                    task['state'] = 'Blocked'
+                    task['now'] = f'🚫 连续回滚{rollback_count}次仍无法推进，已自动挂起'
+                    task['block'] = f'连续停滞且回滚{rollback_count}次均失败，需人工介入'
+                    sched['stallSince'] = None
+                    _scheduler_add_flow(task, f'连续回滚{rollback_count}次，自动挂起等待人工介入')
+                    actions.append({'taskId': task_id, 'action': 'blocked', 'reason': f'max rollback {rollback_count}'})
+                    changed = True
+            elif snap_state and snap_state != state:
                 old_state = state
                 task['state'] = snap_state
                 task['org'] = snapshot.get('org', task.get('org', ''))
@@ -1224,9 +1246,10 @@ def handle_scheduler_scan(threshold_sec=600):
                 task['block'] = '无'
                 sched['retryCount'] = 0
                 sched['escalationLevel'] = 0
+                sched['rollbackCount'] = rollback_count + 1
                 sched['stallSince'] = None
                 sched['lastProgressAt'] = now_iso()
-                _scheduler_add_flow(task, f'连续停滞，自动回滚：{old_state} → {snap_state}')
+                _scheduler_add_flow(task, f'连续停滞，自动回滚：{old_state} → {snap_state}（第{rollback_count + 1}次）')
                 pending_rollbacks.append((task_id, snap_state))
                 actions.append({'taskId': task_id, 'action': 'rollback', 'toState': snap_state})
                 changed = True
@@ -2038,8 +2061,17 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
 
     def _do_dispatch():
         try:
-            if not _check_gateway_alive():
-                log.warning(f'⚠️ {task_id} 自动派发跳过: Gateway 未启动')
+            # Gateway 可能暂时不可达（休眠恢复、进程重启），等待后重试
+            import time as _time
+            _gw_alive = False
+            for _gw_attempt in range(3):
+                if _check_gateway_alive():
+                    _gw_alive = True
+                    break
+                if _gw_attempt < 2:
+                    _time.sleep(5 * (_gw_attempt + 1))  # 5s, 10s
+            if not _gw_alive:
+                log.warning(f'⚠️ {task_id} 自动派发跳过: Gateway 未启动（重试3次仍不可达）')
                 _update_task_scheduler(task_id, lambda t, s: s.update({
                     'lastDispatchAt': now_iso(),
                     'lastDispatchStatus': 'gateway-offline',
@@ -2218,8 +2250,25 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _check_auth(self):
+        """检查认证，未通过返回 True（已发送 401 响应）。"""
+        p = urlparse(self.path).path.rstrip('/')
+        if not requires_auth(p):
+            return False
+        token = extract_token(self.headers)
+        if not token or not verify_token(token):
+            self.send_json({'ok': False, 'error': '未登录或会话已过期'}, 401)
+            return True
+        return False
+
     def do_GET(self):
         p = urlparse(self.path).path.rstrip('/')
+        # 认证状态端点（公开）
+        if p == '/api/auth/status':
+            self.send_json({'enabled': auth_enabled(), 'configured': auth_configured()})
+            return
+        if self._check_auth():
+            return
         if p in ('', '/dashboard', '/dashboard.html'):
             self.send_file(DIST / 'index.html')
         elif p == '/healthz':
@@ -2348,6 +2397,42 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw) if raw else {}
         except Exception:
             self.send_json({'ok': False, 'error': 'invalid JSON'}, 400)
+            return
+
+        # ── 认证端点（公开） ──
+        if p == '/api/auth/setup':
+            pw = body.get('password', '')
+            if not isinstance(pw, str) or not pw:
+                self.send_json({'ok': False, 'error': '请提供密码'}, 400)
+                return
+            self.send_json(setup_password(pw))
+            return
+        if p == '/api/auth/login':
+            pw = body.get('password', '')
+            if not isinstance(pw, str) or not pw:
+                self.send_json({'ok': False, 'error': '请提供密码'}, 400)
+                return
+            if verify_password(pw):
+                token = create_token()
+                resp = {'ok': True, 'token': token}
+                # 同时设置 HttpOnly cookie
+                try:
+                    body_bytes = json.dumps(resp, ensure_ascii=False).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json; charset=utf-8')
+                    self.send_header('Content-Length', str(len(body_bytes)))
+                    self.send_header('Set-Cookie', f'edict_token={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400')
+                    cors_headers(self)
+                    self.end_headers()
+                    self.wfile.write(body_bytes)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            else:
+                self.send_json({'ok': False, 'error': '密码错误'}, 401)
+            return
+
+        # ── 认证检查 ──
+        if self._check_auth():
             return
 
         if p == '/api/morning-config':
@@ -2686,10 +2771,31 @@ def main():
     log.info(f'三省六部看板启动 → http://{args.host}:{args.port}')
     print(f'   按 Ctrl+C 停止')
 
+    auth_init(DATA)
+    if auth_enabled():
+        log.info('🔒 JWT 认证已启用')
+    else:
+        log.info('🔓 认证未配置，所有 API 公开访问（POST /api/auth/setup 设置密码）')
+
     migrate_notification_config()
 
     # 启动恢复：重新派发上次被 kill 中断的 queued 任务
     threading.Timer(3.0, _startup_recover_queued_dispatches).start()
+
+    # 定时巡检：每 120 秒自动扫描停滞任务并触发重试/升级/回滚
+    def _periodic_scheduler_scan():
+        while True:
+            try:
+                import time as _time
+                _time.sleep(120)
+                result = handle_scheduler_scan(threshold_sec=180)
+                count = result.get('count', 0) if isinstance(result, dict) else 0
+                if count > 0:
+                    log.info(f'🔍 定时巡检：{count} 个动作')
+            except Exception as e:
+                log.warning(f'定时巡检异常: {e}')
+    threading.Thread(target=_periodic_scheduler_scan, daemon=True).start()
+    log.info('🔍 定时巡检已启动（每120秒）')
 
     try:
         server.serve_forever()
