@@ -45,3 +45,10 @@ dist/
 # Backups
 *.bak*
 data
+
+# Local dev/test scripts
+_*.py
+
+# Generated docs
+*.docx
+*.pdf
