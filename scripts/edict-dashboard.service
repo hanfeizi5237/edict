@@ -1,0 +1,31 @@
+[Unit]
+Description=三省六部监控看板服务
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/edict/dashboard
+ExecStart=/usr/bin/python3 /root/edict/dashboard/server.py --port 7899 --host 0.0.0.0
+Restart=always
+RestartSec=5
+StartLimitInterval=300
+StartLimitBurst=5
+
+# 内存保护
+MemoryMax=1G
+MemoryHigh=768M
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/root/edict/data /root/edict/dashboard
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edict-dashboard
+
+[Install]
+WantedBy=multi-user.target
