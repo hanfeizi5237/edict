@@ -1,4 +1,5 @@
 """Task 模型 — 三省六部任务核心表。"""
+from __future__ import annotations
 
 import enum
 import uuid
@@ -25,24 +26,30 @@ class TaskState(str, enum.Enum):
     Blocked = "Blocked"
     Cancelled = "Cancelled"
     Pending = "Pending"
+    PendingConfirm = "PendingConfirm"
 
 
 TERMINAL_STATES = {TaskState.Done, TaskState.Cancelled}
 
 STATE_TRANSITIONS = {
+    TaskState.Pending: {TaskState.Taizi, TaskState.Cancelled},
     TaskState.Taizi: {TaskState.Zhongshu, TaskState.Cancelled},
     TaskState.Zhongshu: {TaskState.Menxia, TaskState.Cancelled, TaskState.Blocked},
     TaskState.Menxia: {TaskState.Assigned, TaskState.Zhongshu, TaskState.Cancelled},
     TaskState.Assigned: {TaskState.Doing, TaskState.Next, TaskState.Cancelled, TaskState.Blocked},
-    TaskState.Next: {TaskState.Doing, TaskState.Cancelled},
+    TaskState.Next: {TaskState.Doing, TaskState.Cancelled, TaskState.Blocked},
     TaskState.Doing: {TaskState.Review, TaskState.Done, TaskState.Blocked, TaskState.Cancelled},
-    TaskState.Review: {TaskState.Done, TaskState.Doing, TaskState.Cancelled},
+    TaskState.Review: {TaskState.Done, TaskState.Menxia, TaskState.Doing, TaskState.Cancelled, TaskState.PendingConfirm},
+    TaskState.PendingConfirm: {TaskState.Done, TaskState.Review, TaskState.Cancelled},
     TaskState.Blocked: {
         TaskState.Taizi,
         TaskState.Zhongshu,
         TaskState.Menxia,
         TaskState.Assigned,
+        TaskState.Next,
         TaskState.Doing,
+        TaskState.Review,
+        TaskState.Cancelled,
     },
 }
 
@@ -52,6 +59,8 @@ STATE_AGENT_MAP = {
     TaskState.Menxia: "menxia",
     TaskState.Assigned: "shangshu",
     TaskState.Review: "shangshu",
+    TaskState.PendingConfirm: "shangshu",
+    TaskState.Pending: "zhongshu",
 }
 
 ORG_AGENT_MAP = {
@@ -69,6 +78,8 @@ STATE_ORG_MAP = {
     TaskState.Menxia: "门下省",
     TaskState.Assigned: "尚书省",
     TaskState.Review: "尚书省",
+    TaskState.PendingConfirm: "尚书省",
+    TaskState.Pending: "中书省",
 }
 
 
