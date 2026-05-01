@@ -247,10 +247,10 @@ CrewAI 的模式是：几个 Agent 各自干活，做完就交。AutoGen 好一�
 
 ```bash
 # Docker 一行启动
-docker run -p 7891:7891 cft0808/edict
+docker run -p 7891:7899 cft0808/edict
 
 # 打开浏览器
-open http://localhost:7891
+open http://localhost:7899
 ```
 
 如果你装了 OpenClaw，可以完整安装：

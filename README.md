@@ -54,7 +54,7 @@
 </p>
 </details>
 
-> 🐳 **没有 OpenClaw？** 跑一行 `docker run -p 7891:7891 cft0808/edict` 即可体验完整看板 Demo（预置模拟数据）。
+> 🐳 **没有 OpenClaw？** 跑一行 `docker run -p 7891:7899 cft0808/edict` 即可体验完整看板 Demo（预置模拟数据）。
 
 ---
 
@@ -256,9 +256,9 @@ CrewAI 和 AutoGen 的 Agent 协作模式是 **"做完就交"**——没有人�
 ### Docker 一键启动
 
 ```bash
-docker run -p 7891:7891 cft0808/sansheng-demo
+docker run -p 7891:7899 cft0808/sansheng-demo
 ```
-打开 http://localhost:7891 即可体验军机处看板。
+打开 http://localhost:7899 即可体验军机处看板。
 
 <details>
 <summary><b>⚠️ 遇到 <code>exec format error</code>？（点击展开）</b></summary>
@@ -270,7 +270,7 @@ exec /usr/local/bin/python3: exec format error
 
 这是因为镜像架构不匹配。请使用 `--platform` 参数：
 ```bash
-docker run --platform linux/amd64 -p 7891:7891 cft0808/sansheng-demo
+docker run --platform linux/amd64 -p 7891:7899 cft0808/sansheng-demo
 ```
 
 或使用 docker-compose（已内置 `platform: linux/amd64`）：
@@ -319,7 +319,7 @@ bash scripts/run_loop.sh &      # 数据刷新循环
 python3 dashboard/server.py     # 看板服务器
 
 # 打开浏览器
-open http://127.0.0.1:7891
+open http://127.0.0.1:7899
 ```
 
 <details>
@@ -574,7 +574,7 @@ python3 scripts/skill_manager.py update-remote \
 
 ```bash
 # 添加远程 skill
-curl -X POST http://localhost:7891/api/add-remote-skill \
+curl -X POST http://localhost:7899/api/add-remote-skill \
   -H "Content-Type: application/json" \
   -d '{
     "agentId": "menxia",
@@ -584,7 +584,7 @@ curl -X POST http://localhost:7891/api/add-remote-skill \
   }'
 
 # 查看所有远程 skills
-curl http://localhost:7891/api/remote-skills-list
+curl http://localhost:7899/api/remote-skills-list
 ```
 
 **默认可导入 Skill：**
@@ -658,7 +658,7 @@ curl http://localhost:7891/api/remote-skills-list
 
 1. **检查 Agent 注册状态**：
 ```bash
-curl -s http://127.0.0.1:7891/api/agents-status | python3 -m json.tool
+curl -s http://127.0.0.1:7899/api/agents-status | python3 -m json.tool
 ```
 确认 `taizi` agent 的 `statusLabel` 是 `alive`。
 
@@ -676,7 +676,7 @@ grep -i "error\|fail\|unknown" /tmp/openclaw/openclaw-*.log | tail -20
 4. **强制重试**：
 ```bash
 # 手动触发巡检扫描（自动重试卡住的任务）
-curl -X POST http://127.0.0.1:7891/api/scheduler-scan \
+curl -X POST http://127.0.0.1:7899/api/scheduler-scan \
   -H 'Content-Type: application/json' -d '{"thresholdSec":60}'
 ```
 
@@ -692,7 +692,7 @@ curl -X POST http://127.0.0.1:7891/api/scheduler-scan \
 **解决**：
 ```bash
 # 方法 1：指定平台
-docker run --platform linux/amd64 -p 7891:7891 cft0808/sansheng-demo
+docker run --platform linux/amd64 -p 7891:7899 cft0808/sansheng-demo
 
 # 方法 2：使用 docker-compose（已内置 platform）
 docker compose up

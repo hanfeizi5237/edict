@@ -52,7 +52,7 @@
 </p>
 </details>
 
-> 🐳 **No OpenClaw?** Run `docker run -p 7891:7891 cft0808/edict` to try the full dashboard with simulated data.
+> 🐳 **No OpenClaw?** Run `docker run -p 7891:7899 cft0808/edict` to try the full dashboard with simulated data.
 
 ---
 
@@ -190,9 +190,9 @@ This is why Edict produces reliable results on complex tasks: there's a mandator
 ### Docker
 
 ```bash
-docker run -p 7891:7891 cft0808/edict
+docker run -p 7891:7899 cft0808/edict
 ```
-Open http://localhost:7891
+Open http://localhost:7899
 
 ### Full Install
 
@@ -222,7 +222,7 @@ bash scripts/run_loop.sh &      # Data sync loop
 python3 dashboard/server.py     # Dashboard server
 
 # Open browser
-open http://127.0.0.1:7891
+open http://127.0.0.1:7899
 ```
 
 <details>

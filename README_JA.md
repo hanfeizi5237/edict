@@ -52,7 +52,7 @@
 </p>
 </details>
 
-> 🐳 **OpenClawをお持ちでない場合** `docker run -p 7891:7891 cft0808/edict` を実行すれば、シミュレーションデータでダッシュボード全機能をお試しいただけます。
+> 🐳 **OpenClawをお持ちでない場合** `docker run -p 7891:7899 cft0808/edict` を実行すれば、シミュレーションデータでダッシュボード全機能をお試しいただけます。
 
 ---
 
@@ -190,9 +190,9 @@ Edictの**門下省（Review Department）** はまさにこのために存在�
 ### Docker
 
 ```bash
-docker run -p 7891:7891 cft0808/edict
+docker run -p 7891:7899 cft0808/edict
 ```
-http://localhost:7891 を開く
+http://localhost:7899 を開く
 
 ### フルインストール
 
@@ -222,7 +222,7 @@ bash scripts/run_loop.sh &      # データ同期ループ
 python3 dashboard/server.py     # ダッシュボードサーバー
 
 # ブラウザを開く
-open http://127.0.0.1:7891
+open http://127.0.0.1:7899
 ```
 
 <details>

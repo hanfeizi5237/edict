@@ -94,7 +94,7 @@ python dashboard\server.py
 然后浏览器打开：
 
 ```text
-http://127.0.0.1:7891
+http://127.0.0.1:7899
 ```
 
 ---
@@ -213,9 +213,9 @@ Windows 下也建议正常运行 `run_loop.sh`。
 排查时建议直接访问：
 
 ```text
-http://127.0.0.1:7891/api/officials-stats
-http://127.0.0.1:7891/api/agent-config
-http://127.0.0.1:7891/api/live-status
+http://127.0.0.1:7899/api/officials-stats
+http://127.0.0.1:7899/api/agent-config
+http://127.0.0.1:7899/api/live-status
 ```
 
 如果这三个接口能正常返回 JSON，说明 server 没问题。

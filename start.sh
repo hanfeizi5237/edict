@@ -80,15 +80,15 @@ SERVER_PID=$!
 sleep 1
 echo ""
 echo -e "${GREEN}✅ 服务已启动！${NC}"
-echo -e "   看板地址: ${BLUE}http://127.0.0.1:7891${NC}"
+echo -e "   看板地址: ${BLUE}http://127.0.0.1:7899${NC}"
 echo -e "   按 ${YELLOW}Ctrl+C${NC} 关闭所有服务"
 echo ""
 
 # 尝试自动打开浏览器
 if command -v open &>/dev/null; then
-  open http://127.0.0.1:7891
+  open http://127.0.0.1:7899
 elif command -v xdg-open &>/dev/null; then
-  xdg-open http://127.0.0.1:7891
+  xdg-open http://127.0.0.1:7899
 fi
 
 # 等待任一进程退出
