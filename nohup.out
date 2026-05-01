@@ -25,3 +25,6 @@
 21:49:05 [court_discuss] LLM call failed: HTTP Error 404: Not Found
 21:59:31 [court_discuss] Court discuss using openclaw provider=codex_service model=gpt-5.4 api=openai-responses
 21:59:31 [court_discuss] LLM call failed: HTTP Error 404: Not Found
+21:34:01 [server] 三省六部看板启动 → http://0.0.0.0:7899
+21:34:04 [server] 任务数据源: /root/edict/data
+21:34:04 [server] ✅ 启动恢复: 无需恢复
