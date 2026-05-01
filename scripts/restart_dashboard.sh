@@ -75,7 +75,10 @@ echo "✅ 监控看板重启成功！"
 echo ""
 echo "📊 访问地址:"
 echo "   本地：http://127.0.0.1:$PORT/"
-echo "   远程：http://172.16.30.107:$PORT/"
+REMOTE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [ -n "$REMOTE_IP" ]; then
+    echo "   远程：http://$REMOTE_IP:$PORT/"
+fi
 echo ""
 echo "📝 日志文件：$LOG_FILE"
 echo "🔍 查看日志：tail -f $LOG_FILE"
