@@ -11,8 +11,8 @@ Endpoints:
   GET  /api/model-change-log   → data/model_change_log.json
   GET  /api/last-result        → data/last_model_change_result.json
 """
-import json, pathlib, subprocess, sys, threading, argparse, datetime, logging, re, os, socket
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json, pathlib, subprocess, sys, threading, argparse, datetime, logging, re, os, socket, shutil
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -25,7 +25,7 @@ from auth import init as auth_init, requires_auth, extract_token, verify_token, 
 scripts_dir = str(pathlib.Path(__file__).parent.parent / 'scripts')
 sys.path.insert(0, scripts_dir)
 from file_lock import atomic_json_read, atomic_json_write, atomic_json_update
-from utils import validate_url, read_json, now_iso
+from utils import validate_url, read_json, now_iso, python_bin
 from court_discuss import (
     create_session as cd_create, advance_discussion as cd_advance,
     get_session as cd_get, conclude_session as cd_conclude,
@@ -142,17 +142,59 @@ def load_tasks():
 def save_tasks(tasks):
     task_data_dir = get_task_data_dir()
     atomic_json_write(task_data_dir / 'tasks_source.json', tasks)
-    # Trigger refresh (异步，不阻塞，避免僵尸进程)
+    _trigger_refresh()
+
+
+def _trigger_refresh():
+    """Trigger live data refresh in background."""
+    task_data_dir = get_task_data_dir()
     script = task_data_dir.parent / 'scripts' / 'refresh_live_data.py'
     if not script.exists():
         script = SCRIPTS / 'refresh_live_data.py'
 
     def _refresh():
         try:
-            subprocess.run(['python3', str(script)], timeout=30)
+            subprocess.run([python_bin(), str(script)], timeout=30)
         except Exception as e:
             log.warning(f'refresh_live_data.py 触发失败: {e}')
     threading.Thread(target=_refresh, daemon=True).start()
+
+
+def modify_tasks(modifier):
+    """Atomically read-modify-write the tasks file.
+
+    ``modifier(tasks)`` receives the current task list, mutates it in place
+    (or returns a new list), and the result is persisted while the file lock
+    is held.  This avoids the TOCTOU race inherent in separate
+    ``load_tasks()`` / ``save_tasks()`` calls when background threads
+    (dispatch callbacks, periodic scanner) and the HTTP handler mutate tasks
+    concurrently.
+    """
+    task_data_dir = get_task_data_dir()
+    path = task_data_dir / 'tasks_source.json'
+    atomic_json_update(path, modifier, default=[])
+    _trigger_refresh()
+
+
+def modify_task(task_id, updater):
+    """Atomically update a single task identified by *task_id*.
+
+    ``updater(task)`` receives the task dict and should mutate it in place.
+    Returns ``True`` if the task was found and updated, ``False`` otherwise.
+    """
+    found = [False]
+
+    def _modifier(tasks):
+        task = next((t for t in tasks if t.get('id') == task_id), None)
+        if task is None:
+            return tasks
+        updater(task)
+        task['updatedAt'] = now_iso()
+        found[0] = True
+        return tasks
+
+    modify_tasks(_modifier)
+    return found[0]
 
 
 def handle_task_action(task_id, action, reason):
@@ -300,7 +342,7 @@ def add_skill_to_agent(agent_id, skill_name, description, trigger=''):
     skill_md.write_text(template)
     # Re-sync agent config
     try:
-        subprocess.run(['python3', str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
+        subprocess.run([python_bin(), str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
     except Exception:
         pass
     return {'ok': True, 'message': f'技能 {skill_name} 已添加到 {agent_id}', 'path': str(skill_md)}
@@ -414,7 +456,7 @@ def add_remote_skill(agent_id, skill_name, source_url, description=''):
     
     # Re-sync agent config
     try:
-        subprocess.run(['python3', str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
+        subprocess.run([python_bin(), str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
     except Exception:
         pass
     
@@ -532,7 +574,7 @@ def remove_remote_skill(agent_id, skill_name):
         
         # Re-sync agent config
         try:
-            subprocess.run(['python3', str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
+            subprocess.run([python_bin(), str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
         except Exception:
             pass
         
@@ -687,6 +729,13 @@ def handle_create_task(title, org='中书省', official='中书令', priority='n
     return {'ok': True, 'taskId': task_id, 'message': f'旨意 {task_id} 已下达，正在派发给太子'}
 
 
+def _todo_progress(task):
+    todos = task.get('todos') or []
+    total = len(todos)
+    completed = sum(1 for td in todos if td.get('status') == 'completed')
+    return completed, total
+
+
 def handle_review_action(task_id, action, comment=''):
     """门下省御批：准奏/封驳。"""
     tasks = load_tasks()
@@ -706,6 +755,9 @@ def handle_review_action(task_id, action, comment=''):
             remark = f'✅ 准奏：{comment or "门下省审议通过"}'
             to_dept = '尚书省'
         else:  # Review
+            completed, total = _todo_progress(task)
+            if total > 0 and completed < total:
+                return {'ok': False, 'error': f'子任务尚未全部完成（{completed}/{total}），不能直接准奏完结'}
             task['state'] = 'Done'
             task['now'] = '御批通过，任务完成'
             remark = f'✅ 御批准奏：{comment or "审查通过"}'
@@ -1047,16 +1099,30 @@ def _scheduler_mark_progress(task, note=''):
         _scheduler_add_flow(task, f'进展确认：{note}')
 
 
+def _resolve_openclaw_bin():
+    """Return the OpenClaw CLI path used by dashboard dispatch.
+
+    On Windows, npm-installed CLIs are commonly exposed as .cmd shims.  Using
+    shutil.which lets Python resolve that shim before subprocess runs.
+    """
+    configured = os.environ.get('OPENCLAW_BIN', '').strip()
+    if configured:
+        return configured
+    return shutil.which('openclaw')
+
+
 def _update_task_scheduler(task_id, updater):
-    tasks = load_tasks()
-    task = next((t for t in tasks if t.get('id') == task_id), None)
-    if not task:
-        return False
-    sched = _ensure_scheduler(task)
-    updater(task, sched)
-    task['updatedAt'] = now_iso()
-    save_tasks(tasks)
-    return True
+    """Atomically update a task's scheduler state.
+
+    Uses ``modify_task`` to hold the file lock for the entire
+    read-modify-write cycle, preventing concurrent dispatch threads and
+    the periodic scanner from clobbering each other's writes.
+    """
+    def _apply(task):
+        sched = _ensure_scheduler(task)
+        updater(task, sched)
+
+    return modify_task(task_id, _apply)
 
 
 def get_scheduler_state(task_id):
@@ -1082,6 +1148,7 @@ def get_scheduler_state(task_id):
 
 
 def handle_scheduler_retry(task_id, reason=''):
+    # Pre-check before acquiring lock (avoids holding lock for error paths)
     tasks = load_tasks()
     task = next((t for t in tasks if t.get('id') == task_id), None)
     if not task:
@@ -1090,16 +1157,24 @@ def handle_scheduler_retry(task_id, reason=''):
     if state in _TERMINAL_STATES or state == 'Blocked':
         return {'ok': False, 'error': f'任务 {task_id} 当前状态 {state} 不支持重试'}
 
-    sched = _ensure_scheduler(task)
-    sched['retryCount'] = int(sched.get('retryCount') or 0) + 1
-    sched['lastRetryAt'] = now_iso()
-    sched['lastDispatchTrigger'] = 'taizi-retry'
-    _scheduler_add_flow(task, f'触发重试第{sched["retryCount"]}次：{reason or "超时未推进"}')
-    task['updatedAt'] = now_iso()
-    save_tasks(tasks)
+    result = {'retryCount': 0, 'state': state}
 
-    dispatch_for_state(task_id, task, state, trigger='taizi-retry')
-    return {'ok': True, 'message': f'{task_id} 已触发重试派发', 'retryCount': sched['retryCount']}
+    def _apply(task):
+        cur = task.get('state', '')
+        if cur in _TERMINAL_STATES or cur == 'Blocked':
+            return  # state changed between pre-check and lock; skip
+        sched = _ensure_scheduler(task)
+        sched['retryCount'] = int(sched.get('retryCount') or 0) + 1
+        sched['lastRetryAt'] = now_iso()
+        sched['lastDispatchTrigger'] = 'taizi-retry'
+        _scheduler_add_flow(task, f'触发重试第{sched["retryCount"]}次：{reason or "超时未推进"}')
+        result['retryCount'] = sched['retryCount']
+        result['state'] = cur
+
+    modify_task(task_id, _apply)
+
+    dispatch_for_state(task_id, task, result['state'], trigger='taizi-retry')
+    return {'ok': True, 'message': f'{task_id} 已触发重试派发', 'retryCount': result['retryCount']}
 
 
 def handle_scheduler_escalate(task_id, reason=''):
@@ -1137,6 +1212,7 @@ def handle_scheduler_escalate(task_id, reason=''):
 
 
 def handle_scheduler_rollback(task_id, reason=''):
+    # Pre-check before acquiring lock
     tasks = load_tasks()
     task = next((t for t in tasks if t.get('id') == task_id), None)
     if not task:
@@ -1147,115 +1223,142 @@ def handle_scheduler_rollback(task_id, reason=''):
     if not snap_state:
         return {'ok': False, 'error': f'任务 {task_id} 无可用回滚快照'}
 
-    old_state = task.get('state', '')
-    task['state'] = snap_state
-    task['org'] = snapshot.get('org', task.get('org', ''))
-    task['now'] = f'↩️ 太子调度自动回滚：{reason or "恢复到上个稳定节点"}'
-    task['block'] = '无'
-    sched['retryCount'] = 0
-    sched['escalationLevel'] = 0
-    sched['stallSince'] = None
-    sched['lastProgressAt'] = now_iso()
-    _scheduler_add_flow(task, f'执行回滚：{old_state} → {snap_state}，原因：{reason or "停滞恢复"}')
-    task['updatedAt'] = now_iso()
-    save_tasks(tasks)
+    result = {'snap_state': snap_state}
 
-    if snap_state not in _TERMINAL_STATES:
-        dispatch_for_state(task_id, task, snap_state, trigger='taizi-rollback')
+    def _apply(task):
+        sched = _ensure_scheduler(task)
+        snapshot = sched.get('snapshot') or {}
+        s_state = snapshot.get('state')
+        if not s_state:
+            return  # snapshot cleared between pre-check and lock
+        old_state = task.get('state', '')
+        task['state'] = s_state
+        task['org'] = snapshot.get('org', task.get('org', ''))
+        task['now'] = f'↩️ 太子调度自动回滚：{reason or "恢复到上个稳定节点"}'
+        task['block'] = '无'
+        sched['retryCount'] = 0
+        sched['escalationLevel'] = 0
+        sched['stallSince'] = None
+        sched['lastProgressAt'] = now_iso()
+        _scheduler_add_flow(task, f'执行回滚：{old_state} → {s_state}，原因：{reason or "停滞恢复"}')
+        result['snap_state'] = s_state
 
-    return {'ok': True, 'message': f'{task_id} 已回滚到 {snap_state}'}
+    modify_task(task_id, _apply)
+
+    if result['snap_state'] not in _TERMINAL_STATES:
+        dispatch_for_state(task_id, task, result['snap_state'], trigger='taizi-rollback')
+
+    return {'ok': True, 'message': f'{task_id} 已回滚到 {result["snap_state"]}'}
 
 
 def handle_scheduler_scan(threshold_sec=600):
+    """Periodic stall scanner — runs in a background thread.
+
+    Uses ``modify_tasks`` to hold the file lock during the mutation phase,
+    preventing concurrent dispatch callbacks and HTTP handlers from
+    clobbering each other's writes (fixes TOCTOU race between the old
+    ``load_tasks()`` / ``save_tasks()`` pair).
+
+    Side-effects (dispatch, escalation wake) are executed *after* the lock
+    is released so they don't block other writers.
+    """
     threshold_sec = max(60, int(threshold_sec or 600))
-    tasks = load_tasks()
     now_dt = datetime.datetime.now(datetime.timezone.utc)
+    # Collect dispatch/escalation work to execute after the lock is released
     pending_retries = []
     pending_escalates = []
     pending_rollbacks = []
     actions = []
-    changed = False
 
-    for task in tasks:
-        task_id = task.get('id', '')
-        state = task.get('state', '')
-        if not task_id or state in _TERMINAL_STATES or task.get('archived'):
-            continue
-        if state == 'Blocked':
-            continue
+    def _scan(tasks):
+        changed = False
+        for task in tasks:
+            task_id = task.get('id', '')
+            state = task.get('state', '')
+            if not task_id or state in _TERMINAL_STATES or task.get('archived'):
+                continue
+            if state == 'Blocked':
+                continue
 
-        sched = _ensure_scheduler(task)
-        task_threshold = int(sched.get('stallThresholdSec') or threshold_sec)
-        last_progress = _parse_iso(sched.get('lastProgressAt') or task.get('updatedAt'))
-        if not last_progress:
-            continue
-        stalled_sec = max(0, int((now_dt - last_progress).total_seconds()))
-        if stalled_sec < task_threshold:
-            continue
+            sched = _ensure_scheduler(task)
+            task_threshold = int(sched.get('stallThresholdSec') or threshold_sec)
+            last_progress = _parse_iso(sched.get('lastProgressAt') or task.get('updatedAt'))
+            if not last_progress:
+                continue
+            stalled_sec = max(0, int((now_dt - last_progress).total_seconds()))
+            if stalled_sec < task_threshold:
+                continue
 
-        if not sched.get('stallSince'):
-            sched['stallSince'] = now_iso()
-            changed = True
-
-        retry_count = int(sched.get('retryCount') or 0)
-        max_retry = max(0, int(sched.get('maxRetry') or 1))
-        level = int(sched.get('escalationLevel') or 0)
-
-        if retry_count < max_retry:
-            sched['retryCount'] = retry_count + 1
-            sched['lastRetryAt'] = now_iso()
-            sched['lastDispatchTrigger'] = 'taizi-scan-retry'
-            _scheduler_add_flow(task, f'停滞{stalled_sec}秒，触发自动重试第{sched["retryCount"]}次')
-            pending_retries.append((task_id, state))
-            actions.append({'taskId': task_id, 'action': 'retry', 'stalledSec': stalled_sec})
-            changed = True
-            continue
-
-        if level < 2:
-            next_level = level + 1
-            target = 'menxia' if next_level == 1 else 'shangshu'
-            target_label = '门下省' if next_level == 1 else '尚书省'
-            sched['escalationLevel'] = next_level
-            sched['lastEscalatedAt'] = now_iso()
-            _scheduler_add_flow(task, f'停滞{stalled_sec}秒，升级至{target_label}协调', to=target_label)
-            pending_escalates.append((task_id, state, target, target_label, stalled_sec))
-            actions.append({'taskId': task_id, 'action': 'escalate', 'to': target_label, 'stalledSec': stalled_sec})
-            changed = True
-            continue
-
-        if sched.get('autoRollback', True):
-            rollback_count = int(sched.get('rollbackCount') or 0)
-            max_rollback = int(sched.get('maxRollback') or 3)
-            snapshot = sched.get('snapshot') or {}
-            snap_state = snapshot.get('state')
-            if rollback_count >= max_rollback:
-                # 已达最大回滚次数，标记 Blocked 避免无限循环
-                if state != 'Blocked':
-                    task['state'] = 'Blocked'
-                    task['now'] = f'🚫 连续回滚{rollback_count}次仍无法推进，已自动挂起'
-                    task['block'] = f'连续停滞且回滚{rollback_count}次均失败，需人工介入'
-                    sched['stallSince'] = None
-                    _scheduler_add_flow(task, f'连续回滚{rollback_count}次，自动挂起等待人工介入')
-                    actions.append({'taskId': task_id, 'action': 'blocked', 'reason': f'max rollback {rollback_count}'})
-                    changed = True
-            elif snap_state and snap_state != state:
-                old_state = state
-                task['state'] = snap_state
-                task['org'] = snapshot.get('org', task.get('org', ''))
-                task['now'] = '↩️ 太子调度自动回滚到稳定节点'
-                task['block'] = '无'
-                sched['retryCount'] = 0
-                sched['escalationLevel'] = 0
-                sched['rollbackCount'] = rollback_count + 1
-                sched['stallSince'] = None
-                sched['lastProgressAt'] = now_iso()
-                _scheduler_add_flow(task, f'连续停滞，自动回滚：{old_state} → {snap_state}（第{rollback_count + 1}次）')
-                pending_rollbacks.append((task_id, snap_state))
-                actions.append({'taskId': task_id, 'action': 'rollback', 'toState': snap_state})
+            if not sched.get('stallSince'):
+                sched['stallSince'] = now_iso()
                 changed = True
 
-    if changed:
-        save_tasks(tasks)
+            retry_count = int(sched.get('retryCount') or 0)
+            max_retry = max(0, int(sched.get('maxRetry') or 1))
+            level = int(sched.get('escalationLevel') or 0)
+
+            if retry_count < max_retry:
+                sched['retryCount'] = retry_count + 1
+                sched['lastRetryAt'] = now_iso()
+                sched['lastDispatchTrigger'] = 'taizi-scan-retry'
+                _scheduler_add_flow(task, f'停滞{stalled_sec}秒，触发自动重试第{sched["retryCount"]}次')
+                pending_retries.append((task_id, state))
+                actions.append({'taskId': task_id, 'action': 'retry', 'stalledSec': stalled_sec})
+                changed = True
+                continue
+
+            if level < 2:
+                next_level = level + 1
+                target = 'menxia' if next_level == 1 else 'shangshu'
+                target_label = '门下省' if next_level == 1 else '尚书省'
+                sched['escalationLevel'] = next_level
+                sched['lastEscalatedAt'] = now_iso()
+                _scheduler_add_flow(task, f'停滞{stalled_sec}秒，升级至{target_label}协调', to=target_label)
+                pending_escalates.append((task_id, state, target, target_label, stalled_sec))
+                actions.append({'taskId': task_id, 'action': 'escalate', 'to': target_label, 'stalledSec': stalled_sec})
+                changed = True
+                continue
+
+            if sched.get('autoRollback', True):
+                rollback_count = int(sched.get('rollbackCount') or 0)
+                max_rollback = int(sched.get('maxRollback') or 3)
+                snapshot = sched.get('snapshot') or {}
+                snap_state = snapshot.get('state')
+                if rollback_count >= max_rollback:
+                    if state != 'Blocked':
+                        task['state'] = 'Blocked'
+                        task['now'] = f'🚫 连续回滚{rollback_count}次仍无法推进，已自动挂起'
+                        task['block'] = f'连续停滞且回滚{rollback_count}次均失败，需人工介入'
+                        sched['stallSince'] = None
+                        _scheduler_add_flow(task, f'连续回滚{rollback_count}次，自动挂起等待人工介入')
+                        actions.append({'taskId': task_id, 'action': 'blocked', 'reason': f'max rollback {rollback_count}'})
+                        changed = True
+                elif snap_state and snap_state != state:
+                    old_state = state
+                    task['state'] = snap_state
+                    task['org'] = snapshot.get('org', task.get('org', ''))
+                    task['now'] = '↩️ 太子调度自动回滚到稳定节点'
+                    task['block'] = '无'
+                    sched['retryCount'] = 0
+                    sched['escalationLevel'] = 0
+                    sched['rollbackCount'] = rollback_count + 1
+                    sched['stallSince'] = None
+                    sched['lastProgressAt'] = now_iso()
+                    _scheduler_add_flow(task, f'连续停滞，自动回滚：{old_state} → {snap_state}（第{rollback_count + 1}次）')
+                    pending_rollbacks.append((task_id, snap_state))
+                    actions.append({'taskId': task_id, 'action': 'rollback', 'toState': snap_state})
+                    changed = True
+
+        return tasks  # always return — atomic_json_update requires it
+
+    modify_tasks(_scan)
+
+    # --- Side-effects: dispatch & escalation (outside the file lock) ---
+
+    # Re-read tasks for dispatch context (the task objects from _scan are
+    # no longer held under the lock, but dispatch only needs id + state +
+    # title which are immutable at this point).
+    tasks = load_tasks()
 
     for task_id, state in pending_retries:
         retry_task = next((t for t in tasks if t.get('id') == task_id), None)
@@ -1956,13 +2059,24 @@ def get_task_activity(task_id):
         except Exception:
             pass
 
+    last_active = None
+    if updated_at:
+        try:
+            dt = _parse_iso(updated_at)
+            if dt:
+                last_active = dt.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                last_active = updated_at[:19].replace('T', ' ')
+        except Exception:
+            last_active = updated_at[:19].replace('T', ' ')
+
     result = {
         'ok': True,
         'taskId': task_id,
         'taskMeta': task_meta,
         'agentId': agent_id,
         'agentLabel': _STATE_LABELS.get(state, state),
-        'lastActive': updated_at[:19].replace('T', ' ') if updated_at else None,
+        'lastActive': last_active,
         'activity': activity,
         'activitySource': 'progress+session',
         'relatedAgents': sorted(list(related_agents)),
@@ -2083,7 +2197,22 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             # "unknown channel: feishu" 错误（非飞书用户）
             _agent_cfg = read_json(DATA / 'agent_config.json', {})
             _channel = (_agent_cfg.get('dispatchChannel') or '').strip()
-            cmd = ['openclaw', 'agent', '--agent', agent_id, '-m', msg, '--timeout', '300']
+            openclaw_bin = _resolve_openclaw_bin()
+            if not openclaw_bin:
+                err = 'OpenClaw CLI 未找到：请确认已安装 openclaw 并加入 PATH；Windows 可设置 OPENCLAW_BIN 指向 openclaw.cmd'
+                log.warning(f'⚠️ {task_id} 自动派发异常: {err}')
+                _update_task_scheduler(task_id, lambda t, s: (
+                    s.update({
+                        'lastDispatchAt': now_iso(),
+                        'lastDispatchStatus': 'openclaw-missing',
+                        'lastDispatchAgent': agent_id,
+                        'lastDispatchTrigger': trigger,
+                        'lastDispatchError': err,
+                    }),
+                    _scheduler_add_flow(t, f'派发异常：OpenClaw CLI 未找到（{trigger}）', to=t.get('org', ''))
+                ))
+                return
+            cmd = [openclaw_bin, 'agent', '--agent', agent_id, '-m', msg, '--timeout', '300']
             if _channel:
                 cmd.extend(['--deliver', '--channel', _channel])
             max_retries = 2
@@ -2131,6 +2260,19 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
                     'lastDispatchError': 'timeout',
                 }),
                 _scheduler_add_flow(t, f'派发超时：{agent_id}（{trigger}）', to=t.get('org', ''))
+            ))
+        except FileNotFoundError as e:
+            err = f'OpenClaw CLI 未找到：{e}'
+            log.warning(f'⚠️ {task_id} 自动派发异常: {err}')
+            _update_task_scheduler(task_id, lambda t, s: (
+                s.update({
+                    'lastDispatchAt': now_iso(),
+                    'lastDispatchStatus': 'openclaw-missing',
+                    'lastDispatchAgent': agent_id,
+                    'lastDispatchTrigger': trigger,
+                    'lastDispatchError': err[:200],
+                }),
+                _scheduler_add_flow(t, f'派发异常：OpenClaw CLI 未找到（{trigger}）', to=t.get('org', ''))
             ))
         except Exception as e:
             log.warning(f'⚠️ {task_id} 自动派发异常: {e}')
@@ -2520,7 +2662,7 @@ class Handler(BaseHTTPRequestHandler):
             force = body.get('force', True)  # 从看板手动触发默认强制
             def do_refresh():
                 try:
-                    cmd = ['python3', str(SCRIPTS / 'fetch_morning_news.py')]
+                    cmd = [python_bin(), str(SCRIPTS / 'fetch_morning_news.py')]
                     if force:
                         cmd.append('--force')
                     subprocess.run(cmd, timeout=120)
@@ -2687,8 +2829,8 @@ class Handler(BaseHTTPRequestHandler):
             # Async apply
             def apply_async():
                 try:
-                    subprocess.run(['python3', str(SCRIPTS / 'apply_model_changes.py')], timeout=30)
-                    subprocess.run(['python3', str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
+                    subprocess.run([python_bin(), str(SCRIPTS / 'apply_model_changes.py')], timeout=30)
+                    subprocess.run([python_bin(), str(SCRIPTS / 'sync_agent_config.py')], timeout=10)
                 except Exception as e:
                     print(f'[apply error] {e}', file=sys.stderr)
 
@@ -2767,7 +2909,7 @@ def main():
         f'http://127.0.0.1:{args.port}', f'http://localhost:{args.port}',
     }
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server = HTTPServer((args.host, args.port), Handler)
     log.info(f'三省六部看板启动 → http://{args.host}:{args.port}')
     print(f'   按 Ctrl+C 停止')
 

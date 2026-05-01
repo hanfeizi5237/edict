@@ -120,4 +120,5 @@ jobs:
 
       - name: Verify FastAPI app imports
         working-directory: edict/backend
-        run: python -c "from app.main import app; print(f'FastAPI app loaded: {len(app.routes)} routes')"
+        run: |
+          python -c "from app.main import app; print(f'FastAPI app loaded: {len(app.routes)} routes')"

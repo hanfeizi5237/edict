@@ -4,7 +4,8 @@
 避免 read_json / now_iso 等基础函数在多个脚本中重复定义
 """
 import os
-import json, pathlib, datetime
+import sys
+import json, pathlib, datetime, shutil
 
 
 def read_json(path, default=None):
@@ -37,6 +38,11 @@ def safe_name(s: str) -> bool:
     """检查名称是否只含安全字符（字母、数字、下划线、连字符、中文）"""
     import re
     return bool(re.match(r'^[a-zA-Z0-9_\-\u4e00-\u9fff]+$', s))
+
+
+def python_bin() -> str:
+    """返回当前 Python 解释器路径，兼容 Windows（无 python3 命令）"""
+    return sys.executable or shutil.which('python3') or shutil.which('python') or 'python3'
 
 
 def validate_url(url: str, allowed_schemes=('https',), allowed_domains=None) -> bool:
